@@ -13,6 +13,10 @@ trait Monad[F[_]] extends Functor[F] {
 
   def map2[A, B, C](a: F[A], b: F[B])(f: (A, B) => C): F[C] = flatMap(a)(a => map(b)(b => f(a, b)))
 
+  def sequence_[A](fs: LazyList[F[A]]): F[Unit] = foreachM(fs)(skip)
+
+  def sequence_[A](fs: F[A]*): F[Unit] = sequence_(fs.to(LazyList))
+
   /**
    * 循环执行n次，并获取返回
    *
@@ -42,6 +46,19 @@ trait Monad[F[_]] extends Functor[F] {
    * @return
    */
   def skip[A](a: F[A]): F[Unit] = as(a)(())
+
+  def when[A](b: Boolean)(fa: => F[A]): F[Boolean] = if (b) as(fa)(true) else unit(false)
+
+  def forever[A, B](a: F[A]): F[B] = {
+    lazy val t: F[B] = a flatMap (_ => t)
+    t
+  }
+
+  def doWhile[A](a: F[A])(cond: A => F[Boolean]): F[Unit] = for {
+    a1 <- a
+    ok <- cond(a1)
+    _ <- if (ok) doWhile(a)(cond) else unit(())
+  } yield ()
 
   /**
    * 折叠单子
@@ -83,6 +100,6 @@ trait Monadic[F[_], A] {
   def flatMap[B](f: A => F[B]): F[B] = F.flatMap(a)(f)
 
   def **[B](b: F[B]) = F.map2(a, b)((_, _))
-  
-  def skip:F[Unit] = F.skip(a)
+
+  def skip: F[Unit] = F.skip(a)
 }
