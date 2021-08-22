@@ -1,6 +1,8 @@
 package function.localEffects
 
-class LocalEffects {
+import scala.reflect.ClassTag
+
+object Mutale {
 
 }
 
@@ -53,11 +55,35 @@ object STRef {
   })
 }
 
+val q = for {
+  r1 <- STRef[Nothing, Int](1)
+  r2 <- STRef[Nothing, Int](1)
+  x <- r1.read
+  y <- r2.read
+  _ <- r1.write(y+1)
+  _ <- r2.write(x+1)
+  a <- r1.read
+  b <- r2.read
+} yield (a,b)
+
 trait RunableST[A] {
   def apply[S]: ST[S, A]
 }
 
-sealed abstract class STArray[S, A](implicit manifest: Manifest[A]) {
+val p = new RunableST[(Int,Int)] {
+  override def apply[S]: ST[S, (Int, Int)] = for {
+    r1 <- STRef(1)
+    r2 <- STRef(1)
+    x <- r1.read
+    y <- r2.read
+    _ <- r1.write(y+1)
+    _ <- r2.write(x+1)
+    a <- r1.read
+    b <- r2.read
+  } yield (a,b)
+}
+
+sealed abstract class STArray[S, A](implicit manifest: ClassTag[A]) {
   protected def value: Array[A]
 
   def size: ST[S, Int] = ST(value.size)
@@ -72,11 +98,46 @@ sealed abstract class STArray[S, A](implicit manifest: Manifest[A]) {
   def read(i: Int): ST[S, A] = ST(value(i))
 
   def freeze: ST[S, List[A]] = ST(value.toList)
+
+  /**
+   * 练习14.1
+   * @param xs
+   * @return
+   */
+  def fill(xs: Map[Int, A]): ST[S, Unit] = xs.foldRight(ST[S, Unit](())) {
+    case ((k, v), st) => st.flatMap(_ => write(k, v))
+  }
+
+  def swap(i: Int, j: Int): ST[S, Unit] = for {
+    x <- read(i)
+    y <- read(j)
+    _ <- write(i, y)
+    _ <- write(j, x)
+  } yield ()
 }
 
 object STArray {
-  def apply[S, A: Manifest](sz: Int, v: A): ST[S, STArray[S, A]] =
+  def apply[S, A: ClassTag](sz: Int, v: A): ST[S, STArray[S, A]] = ST(new STArray[S, A]() {
+    lazy val value = Array.fill(sz)(v)
+  })
+
+  def fromList[S, A: ClassTag](xs: List[A]): ST[S, STArray[S, A]] =
     ST(new STArray[S, A]() {
-      lazy val value = Array.fill(sz)(v)
+      lazy val value = xs.toArray
     })
 }
+
+//object Immutable {
+//  def noop[S] = ST[S,Unit](())
+//  def partition[S](a: STArray[S, Int], l: Int, r: Int, pivot: Int): ST[S, Int] = for {
+//    vp <- a.read(pivot)
+//    _ <- a.swap(pivot,r)
+//    j <-  STRef(l)
+//    _ <- (l until r).foldLeft(noop[S])((s,i)=>for {
+//      _ <- s
+//      vi <- a.read(i)
+//      _ <-
+//    })
+//  }
+//}
+
