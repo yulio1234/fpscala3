@@ -1,6 +1,9 @@
 package function.streamingio
 
-import function.iomonad.{IO, Monad}
+import function.iomonad.{IO, Monad, unsafePerformIO}
+
+import java.io.{BufferedReader, FileReader}
+import java.util.concurrent.Executors
 
 object ImperativeAndLazyIO {
 
@@ -252,6 +255,35 @@ object GeneralizedLazyListTransducers {
 
     def Try[F[_], O](p: => Process[F, O]): Process[F, O] = try p catch {
       case e: Throwable => Halt(e)
+    }
+
+    def runLog[O](src: Process[IO, O]): IO[IndexedSeq[O]] = IO {
+      val E = Executors.newFixedThreadPool(4)
+
+      def go(cur: Process[IO, O], acc: IndexedSeq[O]): IndexedSeq[O] = cur match {
+        case Emit(h, t) => go(t, acc :+ h)
+        case Halt(End) => acc
+        case Halt(err) => throw err
+        case Await(req, recv) =>
+          val next = try recv(Right(unsafePerformIO(req)(E)))
+          catch {
+            case err: Throwable => recv(Left(err))
+          }
+          go(next, acc)
+      }
+
+      try go(src, IndexedSeq())
+      finally E.shutdown()
+    }
+
+    val p: Process[IO, String] = await(IO(new BufferedReader(new FileReader("line.text")))) {
+      case Right(b) =>
+        lazy val next: Process[IO, String] = await(IO(b.readLine())) {
+          case Left(e) => await(IO(b.close()))(_ => Halt(e))
+          case Right(line) => if (line eq null) Halt(End) else Emit(line, next)
+        }
+        next
+      case Left(e) => Halt(e)
     }
   }
 }
