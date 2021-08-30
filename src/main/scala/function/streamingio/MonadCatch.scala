@@ -23,6 +23,6 @@ object MonadCatch {
 
     override def attempt[A](a: Task[A]): Task[Either[Throwable, A]] = a.attempt
 
-    override def fail[A](t: Throwable): Task[A] = Task.fail(e)
+    override def fail[A](t: Throwable): Task[A] = Task.fail(t)
   }
 }

@@ -9,10 +9,10 @@ package function.iomonad
 case class Task[A](get: IO[Either[Throwable, A]]) {
   def flatMap[B](f: A => Task[B]): Task[B] = Task(get flatMap {
     case Left(e) => IO(Left(e))
-    case Right(a) => Right(f(a))
+    case Right(a) => f(a).get
   })
 
-  def map[B](f: A => B): Task[B] = flatMap(f andThen (Task.no))
+  def map[B](f: A => B): Task[B] = flatMap(f andThen (Task.now))
 
   def attempt:Task[Either[Throwable,A]] = Task(get map{
     case Left(e) => Right(Left(e))
