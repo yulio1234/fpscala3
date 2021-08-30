@@ -1,6 +1,7 @@
 package function.streamingio
 
 import function.iomonad.{IO, Monad, unsafePerformIO}
+import function.streamingio.GeneralizedLazyListTransducers.Process
 
 import java.io.{BufferedReader, FileReader}
 import java.util.concurrent.Executors
@@ -235,6 +236,16 @@ object GeneralizedLazyListTransducers {
       case Halt(err) => Halt(err)
       case Emit(o, t) => Try(f(o)) ++ t.flatMap(f)
       case Await(req, recv) => Await(req, recv andThen (_ flatMap (f)))
+    }
+
+    def runLog(implicit F:MonadCatch[F]):F[IndexedSeq[O]] = {
+      def go(cur:Process[F,O],acc:IndexedSeq[O]):F[IndexedSeq[O]] = cur match {
+        case Emit(h,t) => go(t,acc :+ h)
+        case Halt(End) => F.unit(acc)
+        case Halt(err) => F.fail(err)
+        case Await(req,recv) => F.flatMap(F.attempt(req)) {e=>go(Try(recv(e)),acc)}
+      }
+      go(this,IndexedSeq())
     }
   }
 
