@@ -238,14 +238,35 @@ object GeneralizedLazyListTransducers {
       case Await(req, recv) => Await(req, recv andThen (_ flatMap (f)))
     }
 
-    def runLog(implicit F:MonadCatch[F]):F[IndexedSeq[O]] = {
-      def go(cur:Process[F,O],acc:IndexedSeq[O]):F[IndexedSeq[O]] = cur match {
-        case Emit(h,t) => go(t,acc :+ h)
+    def runLog(implicit F: MonadCatch[F]): F[IndexedSeq[O]] = {
+      def go(cur: Process[F, O], acc: IndexedSeq[O]): F[IndexedSeq[O]] = cur match {
+        case Emit(h, t) => go(t, acc :+ h)
         case Halt(End) => F.unit(acc)
         case Halt(err) => F.fail(err)
-        case Await(req,recv) => F.flatMap(F.attempt(req)) {e=>go(Try(recv(e)),acc)}
+        case Await(req, recv) => F.flatMap(F.attempt(req)) { e => go(Try(recv(e)), acc) }
       }
-      go(this,IndexedSeq())
+
+      go(this, IndexedSeq())
+    }
+
+    def asFinalizer: Process[F, O] = this match {
+      case Emit(h, t) => Emit(h, t.asFinalizer)
+      case Halt(e) => Halt(e)
+      case Await(req, recv) => await(req) {
+        case Left(Kill) => this.asFinalizer
+        case x => recv(x)
+      }
+    }
+
+    def onComplate(p: => Process[F, O]): Process[F, O] = this.onHalt {
+      case End => p.asFinalizer
+      case err => p.asFinalizer ++ Halt(err)
+    }
+
+    final def drain[O2]: Process[F, O2] = this match {
+      case Halt(e) => Halt(e)
+      case Emit(h, t) => t.drain
+      case Await(req, recv) => Await(req, recv andThen (_.drain))
     }
   }
 
@@ -296,5 +317,15 @@ object GeneralizedLazyListTransducers {
         next
       case Left(e) => Halt(e)
     }
+
+    def resource[R, O](acquire: IO[R])(use: R => Process[IO, O])(release: R => Process[IO, O]): Process[IO, O] =
+      eval(acquire) flatMap { r => use(r).onComplate(release(r)) }
+
+    def eval[F[_], A](a: F[A]): Process[F, A] = await[F, A, A](a) {
+      case Left(err) => Halt(err)
+      case Right(a) => Emit(a, Halt(End))
+    }
+
+    def eval_[F[_], A, B](a: F[A]): Process[F, B] = eval[F, A](a).drain[B]
   }
 }
