@@ -5,6 +5,9 @@ import function.streamingio.GeneralizedLazyListTransducers.Process
 
 import java.io.{BufferedReader, FileReader}
 import java.util.concurrent.Executors
+import language.implicitConversions
+import language.higherKinds
+import language.postfixOps
 
 object ImperativeAndLazyIO {
 
@@ -238,6 +241,8 @@ object GeneralizedLazyListTransducers {
       case Await(req, recv) => Await(req, recv andThen (_ flatMap (f)))
     }
 
+    def repeat: Process[F, O] = this ++ this.repeat
+
     def runLog(implicit F: MonadCatch[F]): F[IndexedSeq[O]] = {
       def go(cur: Process[F, O], acc: IndexedSeq[O]): F[IndexedSeq[O]] = cur match {
         case Emit(h, t) => go(t, acc :+ h)
@@ -248,6 +253,28 @@ object GeneralizedLazyListTransducers {
 
       go(this, IndexedSeq())
     }
+
+    def |>[O2](p2: Process1[O, O2]): Process[F, O2] = {
+      p2 match {
+        case Halt(e) => this.kill onHalt { e2 => Halt(e) ++ Halt(e) }
+        case Emit(h, t) => Emit(h, this |> t)
+        case Await(req, recv) => this match {
+          case Halt(err) => Halt(err) |> recv(Left(err))
+          case Emit(h, t) => t |> Try(recv.asInstanceOf[Either[Throwable, O] => Process[Is[O]#f, O2]](Right(h)))
+          case Await(req0, recv0) => await(req0)(recv0 andThen (_ |> p2))
+        }
+      }
+    }
+
+    final def kill[O2]: Process[F, O2] = this match {
+      case Await(req, recv) => recv(Left(Kill)).drain.onHalt {
+        case Kill => Halt(End)
+        case e => Halt(e)
+      }
+      case Halt(e) => Halt(e)
+      case Emit(h, t) => t.kill
+    }
+
 
     def asFinalizer: Process[F, O] = this match {
       case Emit(h, t) => Emit(h, t.asFinalizer)
@@ -327,5 +354,65 @@ object GeneralizedLazyListTransducers {
     }
 
     def eval_[F[_], A, B](a: F[A]): Process[F, B] = eval[F, A](a).drain[B]
+
+    case class Is[I]() {
+      sealed trait f[X]
+
+      val Get = new f[I] {}
+    }
+
+    def Get[I] = Is[I]().Get
+
+    type Process1[I, O] = Process[Is[I]#f, O]
+
+    def await1[I, O](recv: I => Process1[I, O], fallback: => Process1[I, O] = halt1[I, O]) = Await(Get[I], (e: Either[Throwable, I]) => e match {
+      case Left(End) => fallback
+      case Left(err) => Halt(err)
+      case Right(i) => Try(recv(i))
+    })
+
+    def emit1[I, O](h: O, t1: Process1[I, O] = halt1[I, O]): Process1[I, O] = emit1(h, t1)
+
+    def halt1[I, O]: Process1[I, O] = Halt[Is[I]#f, O](End)
+
+    def lift[I, O](f: I => O): Process1[I, O] = await1[I, O]((i: I) => emit(f(i))) repeat
+
+    def filter[I](f: I => Boolean): Process1[I, I] = await1(i => if (f(i)) emit(i) else halt1)
+
+    case class T[I, I2]() {
+      sealed trait f[X] {
+        def get: Either[I => X, I2 => X]
+      }
+
+      val L = new f[I] {
+        def get = Left(identity)
+      }
+      val R = new f[I2] {
+        def get = Right(identity)
+      }
+    }
+
+    def L[I, I2] = T[I, I2]().L
+
+    def R[I, I2] = T[I, I2]().R
+
+    type Tee[I, I2, O] = Process[T[I, I2]#f, O]
+
+    def haltT[I, I2, O]: Tee[I, I2, O] = Halt[T[I, I2]#f, O](End)
+
+    def awaitL[I, I2, O](recv: I => Tee[I, I2, O], fallback: => Tee[I, I2, O] = haltT[I, I2, O]): Tee[I, I2, O] = await[T[I, I2]#f, I, O](L) {
+      case Left(End) => fallback
+      case Left(err) => Halt(err)
+      case Right(a) => Try(recv(a))
+    }
+
+    def awaitR[I, I2, O](recv: I2 => Tee[I, I2, O], fallback: => Tee[I, I2, O] = haltT[I, I2, O]) = await[T[I, I2]#f, I2, O](R) {
+      case Left(End) => fallback
+      case Left(err) => Halt(err)
+      case Right(a) => Try(recv(a))
+    }
+
+    def emitT[I, I2, O](h: O, tl: Tee[I, I2, O] = haltT[I, I2, O]) = emit(h, tl)
+
   }
 }
