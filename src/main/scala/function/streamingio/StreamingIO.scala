@@ -1,9 +1,10 @@
 package function.streamingio
 
+import function.iomonad.IO0.fahrenheitToCelsius
 import function.iomonad.{IO, Monad, unsafePerformIO}
 import function.streamingio.GeneralizedLazyListTransducers.Process
 
-import java.io.{BufferedReader, FileReader}
+import java.io.{BufferedReader, FileReader, FileWriter}
 import java.util.concurrent.Executors
 import language.implicitConversions
 import language.higherKinds
@@ -275,6 +276,13 @@ object GeneralizedLazyListTransducers {
       case Emit(h, t) => t.kill
     }
 
+    def filter(f: O => Boolean): Process[F, O] = this |> Process.filter(f)
+
+    def pipe[O2](p2: Process1[O, O2]): Process[F, O2] = this |> p2
+
+    def take(n: Int): Process[F, O] = this |> Process.take(n)
+
+    def once: Process[F, O] = take(1)
 
     def asFinalizer: Process[F, O] = this match {
       case Emit(h, t) => Emit(h, t.asFinalizer)
@@ -295,6 +303,34 @@ object GeneralizedLazyListTransducers {
       case Emit(h, t) => t.drain
       case Await(req, recv) => Await(req, recv andThen (_.drain))
     }
+
+    def tee[O2, O3](p2: Process[F, O2])(t: Tee[O, O2, O3]): Process[F, O3] = {
+      t match {
+        case Halt(e) => this.kill onComplate p2.kill onComplate Halt(e)
+        case Emit(h, t) => Emit(h, (this tee p2) (t))
+        case Await(side, recv) => side.get match {
+          case Left(isO) => this match {
+            case Halt(e) => p2.kill onComplate Halt(e)
+            case Emit(o, ot) => (ot tee p2) (Try(recv.asInstanceOf[Either[Throwable, O] => Process[T[O, O2]#f, O3]](Right(o))))
+            case Await(reqL, recvL) => await(reqL)(recvL andThen (this2 => this2.tee(p2)(t)))
+          }
+          case Right(isO2) => p2 match {
+            case Halt(e) => this.kill onComplate Halt(e)
+            case Emit(o2, ot) => (this tee ot) (Try(recv.asInstanceOf[Either[Throwable, O2] => Process[T[O, O2]#f, O3]](Right(o2))))
+            case Await(reqR, recvR) => await(reqR)(recvR andThen (p3 => this.tee(p3)(t)))
+          }
+        }
+      }
+    }
+
+    def zipWith[O2, O3](p2: Process[F, O2])(f: (O, O2) => O3): Process[F, O3] = (this tee p2) (Process.zipWith(f))
+
+    def zip[O2](p2: Process[F, O2]): Process[F, (O, O2)] = zipWith(p2)((_, _))
+
+    def to[O2](sink: Sink[F, O]): Process[F, Unit] = join {
+      (this zipWith sink) ((o, f) => f(o))
+    }
+
   }
 
   object Process {
@@ -348,6 +384,20 @@ object GeneralizedLazyListTransducers {
     def resource[R, O](acquire: IO[R])(use: R => Process[IO, O])(release: R => Process[IO, O]): Process[IO, O] =
       eval(acquire) flatMap { r => use(r).onComplate(release(r)) }
 
+
+    def lines(filename: String): Process[IO, String] =
+      resource {
+        IO(io.Source.fromFile(filename))
+      } { src =>
+        val iter = src.getLines()
+        val step = if (iter.hasNext) Some(iter.next()) else None
+        lazy val lines: Process[IO, String] = eval(IO(step)).flatMap {
+          case None => Halt(End)
+          case Some(line) => Emit(line, lines)
+        }
+        lines
+      } { src => eval_(IO(src.close())) }
+
     def eval[F[_], A](a: F[A]): Process[F, A] = await[F, A, A](a) {
       case Left(err) => Halt(err)
       case Right(a) => Emit(a, Halt(End))
@@ -378,6 +428,12 @@ object GeneralizedLazyListTransducers {
     def lift[I, O](f: I => O): Process1[I, O] = await1[I, O]((i: I) => emit(f(i))) repeat
 
     def filter[I](f: I => Boolean): Process1[I, I] = await1(i => if (f(i)) emit(i) else halt1)
+
+    def take[I](n: Int): Process1[I, I] = if (n <= 0) halt1 else await1[I, I](i => emit(i, take(n - 1)))
+
+    def id[I]: Process1[I, I] = await1((i: I) => emit1(i, id))
+
+    def intersperse[I](sep: I): Process1[I, I] = await1[I, I](i => emit1(i) ++ id.flatMap(i => emit1(sep) ++ emit1(i)))
 
     case class T[I, I2]() {
       sealed trait f[X] {
@@ -414,5 +470,40 @@ object GeneralizedLazyListTransducers {
 
     def emitT[I, I2, O](h: O, tl: Tee[I, I2, O] = haltT[I, I2, O]) = emit(h, tl)
 
+    def zipWith[I, I2, O](f: (I, I2) => O): Tee[I, I2, O] = awaitL[I, I2, O](i => awaitR((i2 => emitT(f(i, i2))))) repeat
+
+    def zip[I, I2]: Tee[I, I2, (I, I2)] = zipWith((_, _))
+
+    type Sink[F[_], O] = Process[F, O => Process[F, Unit]]
+
+    def fileW(file: String, append: Boolean = false): Sink[IO, String] = resource[FileWriter, String => Process[IO, Unit]] {
+      IO {
+        new FileWriter(file, append)
+      }
+    } { w => constant { (s: String) => eval[IO, Unit](IO(w.write(s))) } } { w =>
+      eval_(IO {
+        w.close
+      })
+    }
+
+
+    def constant[A](a: A): Process[IO, A] = eval(IO(a)).flatMap { a => Emit(a, constant(a)) }
+
+    def join[F[_], O](p: Process[F, Process[F, O]]): Process[F, O] = p.flatMap(pa => pa)
+
+    val converter: Process[IO, Unit] = lines("f.txt")
+      .filter(!_.startsWith("#"))
+      .map(line => fahrenheitToCelsius(line.toDouble).toString)
+      .pipe(intersperse("\n"))
+      .to(fileW("celsius.text"))
+      .drain
+
+    type Channel[F[_], I, O] = Process[F, I => Process[F, O]]
+
+    val converALl: Process[IO, Unit] = (for {
+      out <- fileW("celsius.text").once
+      file <- lines("f.text")
+      _ <- lines(file).map(line => fahrenheitToCelsius(line.toDouble)).flatMap(celsius => out(celsius.toString))
+    } yield ()) drain
   }
 }
